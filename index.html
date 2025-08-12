@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Mini Minecraft Prototype</title>
+<style>
+  html,body{height:100%;margin:0;overflow:hidden;font-family:sans-serif}
+  #hud { position:fixed; left:12px; top:12px; z-index:30; color:#fff; }
+  #inv { position:fixed; right:12px; top:12px; z-index:30; background:rgba(0,0,0,0.4); padding:8px; border-radius:8px; color:#fff; }
+  #menu { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:50; display:none;
+         background:#111; color:#fff; padding:16px; border-radius:8px; width:300px; text-align:center;}
+  #note { position:fixed; left:12px; bottom:12px; color:#fff; z-index:30; font-size:13px; }
+  canvas{display:block}
+  button { padding:8px 12px; margin:8px 0; }
+</style>
+</head>
+<body>
+<div id="hud">Mode: <span id="mode">Third-person</span> — Press <b>V</b> to toggle view • Press <b>Esc</b> to menu</div>
+<div id="inv">
+  Inventory<br/>
+  <div>Selected: <span id="selName">Dirt</span></div>
+  <div style="margin-top:6px;">
+    <button data-type="dirt">Dirt</button>
+    <button data-type="grass">Grass</button>
+    <button data-type="stone">Stone</button>
+  </div>
+  <div style="margin-top:6px;">Left click: place / Right click: break</div>
+</div>
+<div id="menu">
+  <h2>Pause Menu</h2>
+  <div><button id="resumeBtn">Resume</button></div>
+  <div><button id="toggleFP">Toggle First/Third Person</button></div>
+  <div style="margin-top:8px"><small>Multiplayer server: ws://localhost:3000</small></div>
+</div>
+<div id="note">WASD move • Space jump • Click to place/break • Recommended: open via http://localhost</div>
+
+<!-- Three.js (UMD build) -->
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+
+<script>
+/* --------- CONFIG --------- */
+const SERVER_ADDR = 'ws://localhost:3000'; // change if running server on other host/port
+const BLOCK_TYPES = {
+  dirt: { color: 0x8B4513 },
+  grass: { color: 0x228B22 },
+  stone: { color: 0xC2B280 }
+};
+/* -------------------------- */
+
+let scene, camera, renderer;
+let player, playerVelocity = new THREE.Vector3(), onGround = false;
+let world = {}; // key -> mesh
+let pickables = []; // array for raycast
+const blockSize = 1;
+
+let keys = {};
+let selectedBlock = 'dirt';
+let firstPerson = false;
+
+/* Utility */
+function keyStr(x,y,z){ return `${x},${y},${z}`; }
+function addBlock(x,y,z,type='dirt',sync=true){
+  const k = keyStr(x,y,z);
+  if(world[k]) return;
+  const mat = new THREE.MeshLambertMaterial({ color: BLOCK_TYPES[type].color });
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(blockSize,blockSize,blockSize), mat);
+  mesh.position.set(x,y,z);
+  mesh.userData = { grid: [x,y,z], type };
+  scene.add(mesh);
+  world[k] = mesh;
+  pickables.push(mesh);
+  if(sync && ws && ws.readyState===1) ws.send(JSON.stringify({t:'place',x,y,z,type}));
+}
+function removeBlock(x,y,z,sync=true){
+  const k = keyStr(x,y,z);
+  const mesh = world[k];
+  if(!mesh) return;
+  scene.remove(mesh);
+  const idx = pickables.indexOf(mesh);
+  if(idx!==-1) pickables.splice(idx,1);
+  delete world[k];
+  if(sync && ws && ws.readyState===1) ws.send(JSON.stringify({t:'remove',x,y,z}));
+}
+
+/* Scene init */
+function init(){
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceeb);
+
+  renderer = new THREE.WebGLRenderer({ antialias:true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  document.body.appendChild(renderer.domElement);
+
+  camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+
+  // lighting
+  const hemi = new THREE.HemisphereLight(0xffffee, 0x444444, 0.8);
+  scene.add(hemi);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+  dir.position.set(10,20,10);
+  dir.castShadow = true;
+  dir.shadow.mapSize.set(1024,1024);
+  scene.add(dir);
+
+  // ground terrain (flat plane of blocks)
+  const size = 12;
+  for(let x=-size; x<=size; x++){
+    for(let z=-size; z<=size; z++){
+      addBlock(x,0,z, Math.random()>0.9 ? 'grass':'dirt', false);
+    }
+  }
+
+  // small hills
+  for(let i=0;i<60;i++){
+    const hx = Math.floor((Math.random()-0.5)*size*2);
+    const hz = Math.floor((Math.random()-0.5)*size*2);
+    if(Math.random()>0.8) addBlock(hx,1,hz,'grass',false);
+  }
+
+  // player model (simple Steve made from boxes)
+  player = new THREE.Group();
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.8,1.0,0.4), new THREE.MeshLambertMaterial({color:0x00aaff}));
+  body.position.set(0,1.25,0); // centered
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.7,0.7,0.7), new THREE.MeshLambertMaterial({color:0xffd9b3}));
+  head.position.set(0,1.9,0);
+  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.3,0.9,0.3), new THREE.MeshLambertMaterial({color:0x333333}));
+  legL.position.set(-0.2,0.45,0);
+  const legR = legL.clone(); legR.position.set(0.2,0.45,0);
+  player.add(body); player.add(head); player.add(legL); player.add(legR);
+
+  player.position.set(0,2.5,5);
+  scene.add(player);
+
+  // camera start third person:
+  updateCamera();
+
+  // events
+  window.addEventListener('resize', onResize);
+  window.addEventListener('keydown', (e)=>{ keys[e.key.toLowerCase()] = true; if(e.key==='Escape'){ toggleMenu(true); }});
+  window.addEventListener('keyup', (e)=>{ keys[e.key.toLowerCase()] = false; });
+  window.addEventListener('mousedown', onMouseDown);
+
+  // inventory buttons
+  document.querySelectorAll('#inv button').forEach(b=>{
+    b.addEventListener('click', ()=>{ selectedBlock = b.dataset.type; document.getElementById('selName').innerText = selectedBlock; });
+  });
+  document.getElementById('resumeBtn').addEventListener('click', ()=>toggleMenu(false));
+  document.getElementById('toggleFP').addEventListener('click', ()=>{ firstPerson = !firstPerson; document.getElementById('mode').innerText = firstPerson ? 'First-person' : 'Third-person'; updateCamera(); });
+
+  // websocket (multiplayer relay)
+  setupWS();
+
+  animate();
+}
+
+function onResize(){
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+/* --- simple AABB collision for player (player treated as box) --- */
+function collideAABB(pos, size){
+  // returns corrected pos after collisions
+  const half = { x:size.x/2, y:size.y/2, z:size.z/2 };
+  const newPos = pos.clone();
+
+  // check axis separately
+  // X
+  const minX = Math.floor(newPos.x - half.x - 0.5);
+  const maxX = Math.floor(newPos.x + half.x + 0.5);
+  const minY = Math.floor(newPos.y - half.y);
+  const maxY = Math.floor(newPos.y + half.y);
+  const minZ = Math.floor(newPos.z - half.z - 0.5);
+  const maxZ = Math.floor(newPos.z + half.z + 0.5);
+
+  // helper to test if any block intersects at cell (bx,by,bz)
+  function blockAt(bx,by,bz){
+    return !!world[keyStr(bx,by,bz)];
+  }
+
+  // test Y axis first (gravity)
+  // If falling into a block, snap to top of it.
+  for(let by=minY; by<=maxY; by++){
+    for(let bx=minX; bx<=maxX; bx++){
+      for(let bz=minZ; bz<=maxZ; bz++){
+        if(blockAt(bx,by,bz)){
+          // compute block AABB
+          const bxMin = bx - 0.5, bxMax = bx + 0.5;
+          const byMin = by - 0.5, byMax = by + 0.5;
+          const bzMin = bz - 0.5, bzMax = bz + 0.5;
+          // player AABB
+          const pMinY = newPos.y - half.y;
+          const pMaxY = newPos.y + half.y;
+          const overlapX = (newPos.x + half.x) > bxMin && (newPos.x - half.x) < bxMax;
+          const overlapZ = (newPos.z + half.z) > bzMin && (newPos.z - half.z) < bzMax;
+          if(overlapX && overlapZ){
+            // if intersecting in Y, push player up
+            if(pMinY < byMax && pMaxY > byMin){
+              // collision from top of block: snap above
+              if(playerVelocity.y <= 0){
+                newPos.y = by + 0.5 + half.y + 0.0001;
+                playerVelocity.y = 0;
+                onGround = true;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // X and Z collisions: simple correction by preventing penetration by stepping back along axis
+  // We'll do small step incremental movement check (safer than complex SAT)
+  return newPos;
+}
+
+function keyStr(x,y,z){ return `${x},${y},${z}`; }
+
+/* Update camera: third or first person */
+function updateCamera(){
+  if(firstPerson){
+    // camera at head
+    const headWorld = new THREE.Vector3();
+    player.children[1].getWorldPosition(headWorld); // head mesh
+    camera.position.copy(headWorld).add(new THREE.Vector3(0,0.1,0));
+    camera.lookAt(headWorld.clone().add(player.getWorldDirection(new THREE.Vector3()).multiplyScalar(10)));
+  } else {
+    // third person offset behind player
+    const offset = new THREE.Vector3(0,2.2,5);
+    const worldPos = player.position.clone();
+    const camPos = worldPos.clone().add(offset);
+    camera.position.lerp(camPos, 0.2);
+    camera.lookAt(worldPos.clone().add(new THREE.Vector3(0,1.2,0)));
+  }
+}
+
+/* Movement & physics */
+const playerBox = new THREE.Vector3(0.8,1.8,0.8);
+function simulate(dt){
+  // movement intent
+  const speed = 6.0;
+  const forward = new THREE.Vector3();
+  // forward relative to camera's Y rotation
+  const camDir = new THREE.Vector3();
+  camera.getWorldDirection(camDir);
+  camDir.y = 0; camDir.normalize();
+  const camRight = new THREE.Vector3().crossVectors(camDir, camera.up).normalize();
+
+  let move = new THREE.Vector3();
+  if(keys['w']) move.add(camDir);
+  if(keys['s']) move.add(camDir.clone().negate());
+  if(keys['a']) move.add(camRight.clone().negate());
+  if(keys['d']) move.add(camRight);
+  move.normalize();
+
+  // apply horizontal velocity
+  const targetVel = move.multiplyScalar(speed);
+  // smooth vel
+  playerVelocity.x = THREE.MathUtils.lerp(playerVelocity.x, targetVel.x, 0.12);
+  playerVelocity.z = THREE.MathUtils.lerp(playerVelocity.z, targetVel.z, 0.12);
+
+  // gravity
+  const GRAV = -25;
+  playerVelocity.y += GRAV * dt;
+  if(keys[' ']){ // jump
+    if(onGround){
+      playerVelocity.y = 8;
+      onGround = false;
+    }
+  }
+
+  // integrate
+  const newPos = player.position.clone().add(playerVelocity.clone().multiplyScalar(dt));
+  // collision resolution (Y snapping)
+  const corrected = collideAABB(newPos, playerBox);
+  player.position.copy(corrected);
+
+  // if we dropped below -50 -> reset
+  if(player.position.y < -50) { player.position.set(0,5,0); playerVelocity.set(0,0,0); }
+
+  // orient player to movement direction if moving
+  const flatVel = new THREE.Vector3(playerVelocity.x,0,playerVelocity.z);
+  if(flatVel.lengthSq() > 0.001){
+    const look = flatVel.clone().normalize();
+    const angle = Math.atan2(look.x, look.z);
+    player.rotation.y = angle;
+  }
+
+  // update camera depending view
+  updateCamera();
+
+  // send position to server occasionally
+  if(ws && ws.readyState===1){
+    // send less frequently to save bandwidth
+    const now = performance.now();
+    if(!ws._lastSent || now - ws._lastSent > 50){
+      ws.send(JSON.stringify({t:'move', x:player.position.x, y:player.position.y, z:player.position.z, rx:player.rotation.y}));
+      ws._lastSent = now;
+    }
+  }
+}
+
+/* Raycast for placing/removing blocks */
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+function onMouseDown(ev){
+  // unify left/right click via button (0 left, 2 right). Use pointerdown and ev.button.
+  const rect = renderer.domElement.getBoundingClientRect();
+  const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
+  mouse.x = (x / rect.width) * 2 - 1;
+  mouse.y = -(y / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const intersects = raycaster.intersectObjects(pickables, false);
+  if(!intersects.length) return;
+  const hit = intersects[0];
+  const pos = hit.object.position;
+  if(ev.button === 2){ // right click -> break
+    removeBlock(pos.x, pos.y, pos.z, true);
+  } else { // left click -> place adjacent to face (uses face normal)
+    const n = hit.face.normal.clone();
+    const newPos = pos.clone().add(n);
+    const nx = Math.round(newPos.x), ny = Math.round(newPos.y), nz = Math.round(newPos.z);
+    addBlock(nx, ny, nz, selectedBlock, true);
+  }
+}
+
+/* simple WebSocket client to relay events (positions and block changes) */
+let ws = null;
+const otherPlayers = {}; // id -> mesh
+function setupWS(){
+  try {
+    ws = new WebSocket(SERVER_ADDR);
+  } catch(e){ console.warn('WS connect failed', e); return; }
+  ws.onopen = ()=>console.log('WS connected');
+  ws.onmessage = (m)=>{
+    try{
+      const data = JSON.parse(m.data);
+      if(data.t==='playerList'){ // initial
+        for(const p of data.players) updatePlayerRemote(p);
+      } else if(data.t==='move'){
+        updatePlayerRemote(data);
+      } else if(data.t==='place'){
+        addBlock(data.x, data.y, data.z, data.type, false);
+      } else if(data.t==='remove'){
+        removeBlock(data.x, data.y, data.z, false);
+      } else if(data.t==='join'){
+        updatePlayerRemote(data);
+      } else if(data.t==='leave'){
+        if(otherPlayers[data.id]){ scene.remove(otherPlayers[data.id]); delete otherPlayers[data.id]; }
+      }
+    }catch(e){ console.error('WS msg parse', e); }
+  };
+  ws.onclose = ()=>console.log('WS closed');
+}
+function updatePlayerRemote(d){
+  if(!d.id || d.id === (ws && ws._id)) return; // ignore self
+  let p = otherPlayers[d.id];
+  if(!p){
+    p = createRemotePlayer();
+    otherPlayers[d.id] = p;
+    scene.add(p);
+  }
+  p.position.set(d.x, d.y, d.z);
+  if(typeof d.rx === 'number') p.rotation.y = d.rx;
+}
+function createRemotePlayer(){
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(new THREE.BoxGeometry(0.8,1.0,0.4), new THREE.MeshLambertMaterial({color:0xff5555})));
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.6,0.6,0.6), new THREE.MeshLambertMaterial({color:0xffd9b3}));
+  head.position.set(0,0.9,0);
+  g.add(head);
+  return g;
+}
+
+/* animation loop */
+let last = performance.now();
+function animate(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - last)/1000);
+  last = now;
+  simulate(dt);
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+
+init();
+
+/* Context menu disable (so right click works) */
+window.addEventListener('contextmenu', e => e.preventDefault());
+
+/* Menu toggles */
+function toggleMenu(show){
+  const m = document.getElementById('menu');
+  if(show){ m.style.display = 'block'; } else { m.style.display = 'none'; }
+}
+</script>
+</body>
+</html>
