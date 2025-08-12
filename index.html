@@ -65,7 +65,7 @@ node server.js
 
   <!-- Three.js (UMD) -->
   <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-  <!-- PLAYERCONF definition -->
+
   <script>
     const PLAYERCONF = {
       speed: 4.2,     // walking speed
@@ -76,6 +76,7 @@ node server.js
       d: 0.42         // player depth
     };
   </script>
+
 <script>
 /* ===== UI & control wiring ===== */
 const btnSingle = document.getElementById('btnSingle');
@@ -90,9 +91,9 @@ const hostPanel = document.getElementById('menu');
 const closeHost = document.getElementById('closeHost');
 const dbgEl = document.getElementById('dbg');
 
-function dbgLog(...args){ append('log', ...args); console._orig_log(...args); }
-function dbgWarn(...args){ append('warn', ...args); console._orig_warn(...args); }
-function dbgErr(...args){ append('err', ...args); console._orig_error(...args); }
+function dbgLog(...args){ append('log', ...args); console._orig_log?.(...args); }
+function dbgWarn(...args){ append('warn', ...args); console._orig_warn?.(...args); }
+function dbgErr(...args){ append('err', ...args); console._orig_error?.(...args); }
 function append(type, ...args){
   const line = document.createElement('div');
   line.className = type;
@@ -109,7 +110,7 @@ btnMP.onclick = () => { serverPanel.style.display = serverPanel.style.display ==
 
 btnConnect.onclick = () => {
   const addr = serverAddrInput.value.trim() || null;
-  startMultiplayer(addr);
+  startMultiplayerGame(addr);
 };
 btnDisconnect.onclick = () => disconnectWS();
 
@@ -127,16 +128,26 @@ let ws = null, clientId = null;
 const WORLD_RADIUS = 18; // smaller — better perf
 const MAX_BLOCKS = 4000; // safety cap
 
+let animationId = null;
+let pointerLockInitialized = false;
+let pointerLocked = false;
+let moveInterval = null;
+
+/* three init */
 function initThree(){
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x87ceeb);
   renderer = new THREE.WebGLRenderer({antialias:true});
-  // cap pixel ratio to reduce heavy devices
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1));
   renderer.setSize(innerWidth, innerHeight);
-  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.enabled = false; // shadows off for performance
   document.body.appendChild(renderer.domElement);
   camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 1000);
+  window.addEventListener('resize', ()=> {
+    if(!renderer) return;
+    renderer.setSize(innerWidth, innerHeight);
+    camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  });
 }
 
 function createMats(){
@@ -149,9 +160,8 @@ function createMats(){
 
 function addLights(){
   const amb = new THREE.AmbientLight(0xffffff, 0.45); scene.add(amb);
-  const sun = new THREE.DirectionalLight(0xffffff, 0.95); sun.position.set(80,120,40); sun.castShadow=true;
-  sun.shadow.camera.left=-60; sun.shadow.camera.right=60; sun.shadow.camera.top=60; sun.shadow.camera.bottom=-60;
-  sun.shadow.mapSize.set(1024,1024); scene.add(sun);
+  const sun = new THREE.DirectionalLight(0xffffff, 0.95); sun.position.set(80,120,40);
+  scene.add(sun);
 }
 
 function key(x,y,z){ return `${x},${y},${z}`; }
@@ -163,7 +173,8 @@ function addBlock(x,y,z,type='dirt', fromServer=false){
   const geo = new THREE.BoxGeometry(1,1,1);
   const m = new THREE.Mesh(geo, mats[type] || mats.dirt);
   m.position.set(x,y,z);
-  m.castShadow = true; m.receiveShadow = true;
+  // disable shadows for large counts
+  m.castShadow = false; m.receiveShadow = false;
   m.userData.type = type;
   scene.add(m);
   world[id] = m;
@@ -208,8 +219,9 @@ function createPlayer(){
 }
 
 /* camera & pointer-lock (movement works even w/o lock) */
-let pointerLocked = false;
 function enablePointerLock(){
+  if(pointerLockInitialized) return;
+  pointerLockInitialized = true;
   renderer.domElement.addEventListener('click', ()=> renderer.domElement.requestPointerLock?.());
   document.addEventListener('pointerlockchange', ()=> pointerLocked = (document.pointerLockElement === renderer.domElement));
   document.addEventListener('mousemove', (e)=> {
@@ -221,7 +233,20 @@ function enablePointerLock(){
 }
 
 /* input */
-const keys = {}; window.addEventListener('keydown', (e)=> { keys[e.key.toLowerCase()] = true; if(e.key==='Escape') document.exitPointerLock?.(); if(e.key.toLowerCase()==='v') { firstPerson=!firstPerson; document.getElementById('viewMode') && (document.getElementById('viewMode').innerText = firstPerson ? 'First-person':'Third-person'); } }); window.addEventListener('keyup', (e)=> keys[e.key.toLowerCase()] = false);
+const keys = {};
+window.addEventListener('keydown', (e)=> {
+  if(e.code === 'Space') keys['Space'] = true;
+  else if(e.code === 'ShiftLeft' || e.code === 'ShiftRight') keys['Shift'] = true;
+  else keys[e.key?.toLowerCase()] = true;
+
+  if(e.key === 'Escape') document.exitPointerLock?.();
+  if(e.key?.toLowerCase()==='v') { firstPerson=!firstPerson; }
+});
+window.addEventListener('keyup', (e)=> {
+  if(e.code === 'Space') keys['Space'] = false;
+  else if(e.code === 'ShiftLeft' || e.code === 'ShiftRight') keys['Shift'] = false;
+  else keys[e.key?.toLowerCase()] = false;
+});
 
 document.querySelectorAll('.slot').forEach(s => s.addEventListener('click', ()=> { document.querySelectorAll('.slot').forEach(x=>x.classList.remove('sel')); s.classList.add('sel'); selectedBlock = s.dataset.type; }));
 window.addEventListener('keydown', (e)=> { if(['1','2','3'].includes(e.key)){ const map={'1':'dirt','2':'grass','3':'stone'}[e.key]; document.querySelectorAll('.slot').forEach(x=>x.classList.toggle('sel', x.dataset.type===map)); selectedBlock = map; } });
@@ -245,18 +270,18 @@ function onPointerDown(e){
     addBlock(tx,ty,tz,selectedBlock,true); sendIfConnected({t:'place',x:tx,y:ty,z:tz,type:selectedBlock});
   }
 }
-window.addEventListener('pointerdown', onPointerDown);
+window.addEventListener('pointerdown', (e)=> { try{ onPointerDown(e);}catch(err){dbgErr('pointerdown',err);} });
 window.addEventListener('contextmenu', e => e.preventDefault());
 
-/* multiplayer WS logic */
+/* multiplayer WS logic (renamed to avoid collisions) */
 function getServerAddr(){
   try { const p = new URLSearchParams(location.search); const w = p.get('ws'); if(w) return w; } catch(e){}
   const input = serverAddrInput.value.trim();
   if(input) return input;
-  // default try same host (use wss on https)
   return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
 }
-function startMultiplayer(addr=null){
+
+function connectWS(addr=null){
   const server = addr || getServerAddr();
   statText.innerText = 'connecting... ' + server;
   dbgLog('Trying WS:', server);
@@ -267,25 +292,30 @@ function startMultiplayer(addr=null){
   let initReceived = false;
   const initTimer = setTimeout(()=>{ if(!initReceived){ dbgWarn('WS init timeout; falling back to single-player'); ws && ws.close(); statText.innerText = 'init timeout'; fallbackToLocal(); } }, 2500);
 
-  ws.onopen = ()=>{ dbgLog('WS open'); statText.innerText = 'connected'; };
+  ws.onopen = ()=>{ dbgLog('WS open'); statText.innerText = 'connected'; startMoveHeartbeat(); };
   ws.onmessage = (ev) => {
     try {
       const d = JSON.parse(ev.data);
       if(d.t === 'init'){
         initReceived = true; clearTimeout(initTimer);
         clientId = d.id; dbgLog('Init received id',d.id);
-        // clear local world and apply server blocks (simple reset)
-        for(const k in world){ const p = k.split(',').map(Number); removeBlock(p[0],p[1],p[2],true); }
+        // safely clear local world by copying keys first
+        const keys = Object.keys(world);
+        for(const k of keys){ const p = k.split(',').map(Number); removeBlock(p[0],p[1],p[2],true); }
         (d.blocks||[]).forEach(b => addBlock(b.x,b.y,b.z,b.type,true));
       } else if(d.t==='place'){ addBlock(d.x,d.y,d.z,d.type,true); }
       else if(d.t==='remove'){ removeBlock(d.x,d.y,d.z,true); }
-      else if(d.t==='move'){ /* remote player movement handled later if desired */ }
+      else if(d.t==='move'){
+        // optional: represent remote players — for now just log
+        // Could visualize other players later
+        // dbgLog('remote move', d.id, d.x.toFixed(2), d.y.toFixed(2));
+      }
       else if(d.t==='join'){ dbgLog('Join', d.id); }
       else if(d.t==='leave'){ dbgLog('Leave', d.id); }
     } catch(e){ dbgErr('Bad WS msg', e); }
   };
   ws.onerror = (e) => { dbgErr('WS error', e); statText.innerText = 'error'; };
-  ws.onclose = () => { dbgWarn('WS closed'); statText.innerText = 'not connected'; ws=null; };
+  ws.onclose = () => { dbgWarn('WS closed'); statText.innerText = 'not connected'; ws=null; stopMoveHeartbeat(); };
 }
 
 function disconnectWS(){
@@ -293,11 +323,25 @@ function disconnectWS(){
 }
 function sendIfConnected(obj){ if(ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
 
+/* move heartbeat (throttled position updates) */
+function startMoveHeartbeat(){
+  stopMoveHeartbeat();
+  moveInterval = setInterval(()=> {
+    if(ws && ws.readyState === WebSocket.OPEN && clientId && player){
+      sendIfConnected({t:'move', id: clientId, x:player.position.x, y:player.position.y, z:player.position.z, yaw, pitch});
+    }
+  }, 150); // ~6-7 updates/sec
+}
+function stopMoveHeartbeat(){ if(moveInterval){ clearInterval(moveInterval); moveInterval = null; } }
+
 /* physics (improved & less heavy) */
 function aabbIntersects(px,py,pz, halfW, halfH, halfD){
-  const minX = Math.floor(px-halfW), maxX=Math.floor(px+halfW);
-  const minY = Math.floor(py-halfH), maxY=Math.floor(py+halfH);
-  const minZ = Math.floor(pz-halfD), maxZ=Math.floor(pz+halfD);
+  const minX = Math.floor(px - halfW);
+  const maxX = Math.ceil(px + halfW);
+  const minY = Math.floor(py - halfH);
+  const maxY = Math.ceil(py + halfH);
+  const minZ = Math.floor(pz - halfD);
+  const maxZ = Math.ceil(pz + halfD);
   for(let x=minX;x<=maxX;x++) for(let y=minY;y<=maxY;y++) for(let z=minZ;z<=maxZ;z++) if(world[key(x,y,z)]) return true;
   return false;
 }
@@ -314,11 +358,11 @@ function updateLoop(){
   if(keys['w']) move.add(forward); if(keys['s']) move.sub(forward);
   if(keys['a']) move.sub(right); if(keys['d']) move.add(right);
   if(move.lengthSq()>0.0001) move.normalize();
-  const speed = PLAYERCONF.speed * (keys['shift'] ? 1.8:1);
+  const speed = PLAYERCONF.speed * (keys['Shift'] ? 1.8:1);
   vel.x = THREE.MathUtils.lerp(vel.x, move.x*speed, 0.12);
   vel.z = THREE.MathUtils.lerp(vel.z, move.z*speed, 0.12);
 
-  if(keys[' '] && onGround){ vel.y = PLAYERCONF.jump; onGround=false; }
+  if(keys['Space'] && onGround){ vel.y = PLAYERCONF.jump; onGround=false; }
   vel.y += PLAYERCONF.gravity * dt;
 
   // integrate
@@ -346,7 +390,7 @@ function updateLoop(){
   updateCamera();
 
   renderer.render(scene, camera);
-  requestAnimationFrame(updateLoop);
+  animationId = requestAnimationFrame(updateLoop);
 }
 
 /* camera follow */
@@ -355,7 +399,6 @@ function updateCamera(){
     camera.position.copy(player.position).add(new THREE.Vector3(0,PLAYERCONF.h-0.2,0));
     camera.rotation.set(pitch, yaw, 0, 'YXZ');
   } else {
-    // third-person camera (simple chase cam)
     const camDist = 4.5, camHeight = 2.1;
     const camOff = new THREE.Vector3(Math.sin(yaw)*-camDist, camHeight, Math.cos(yaw)*-camDist);
     camera.position.copy(player.position).add(camOff);
@@ -372,17 +415,12 @@ function startSinglePlayer(){
 }
 
 /* start multiplayer (connect) */
-function startMultiplayer(addr){
+function startMultiplayerGame(addr){
   clearScene();
   initThree(); createMats(); addLights(); createPlayer(); enablePointerLock();
   // try WS connect and rely on server's init or fallback
-  startMultiplayerInternal(addr);
+  connectWS(addr);
   lastTime = performance.now(); updateLoop();
-}
-
-function startMultiplayerInternal(addr){
-  const server = addr || getServerAddr();
-  startMultiplayer(server);
 }
 
 /* clear scene/world (when switching) */
@@ -390,8 +428,9 @@ function clearScene(){
   try {
     if(renderer && renderer.domElement){ document.body.removeChild(renderer.domElement); }
   } catch(e){ dbgWarn('remove canvas failed', e); }
+  if(animationId) { cancelAnimationFrame(animationId); animationId = null; }
+  // don't remove global event listeners; they are idempotent
   scene = null; camera=null; renderer=null; world={}; pickables=[]; mats={};
-  // reset player etc
   player=null; vel.set(0,0,0); yaw = 0; pitch = 0; onGround=false;
 }
 
@@ -399,13 +438,11 @@ function clearScene(){
 function fallbackToLocal(){ if(Object.keys(world).length===0){ dbgLog('Generating local world fallback'); generateLocalWorld(); } }
 
 /* initial default: start singleplayer so user can move immediately */
-document.addEventListener('DOMContentLoaded', ()=>{
-  // start single player by default so it's responsive immediately
+document.addEventListener('DOMContentLoaded', ()=> {
   startSinglePlayer();
-  // auto-try connect if ?ws= is present
   try{
     const p = new URLSearchParams(location.search); const w = p.get('ws');
-    if(w){ serverAddrInput.value = w; serverPanel.style.display='block'; startMultiplayer(w); }
+    if(w){ serverAddrInput.value = w; serverPanel.style.display='block'; startMultiplayerGame(w); }
   }catch(e){}
 });
 </script>
