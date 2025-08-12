@@ -65,7 +65,17 @@ node server.js
 
   <!-- Three.js (UMD) -->
   <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-
+  <!-- PLAYERCONF definition -->
+  <script>
+    const PLAYERCONF = {
+      speed: 4.2,     // walking speed
+      jump: 8.5,      // jump strength
+      gravity: -24.5, // gravity acceleration
+      w: 0.72,        // player width
+      h: 1.8,         // player height
+      d: 0.42         // player depth
+    };
+  </script>
 <script>
 /* ===== UI & control wiring ===== */
 const btnSingle = document.getElementById('btnSingle');
@@ -337,6 +347,20 @@ function updateLoop(){
 
   renderer.render(scene, camera);
   requestAnimationFrame(updateLoop);
+}
+
+/* camera follow */
+function updateCamera(){
+  if(firstPerson){
+    camera.position.copy(player.position).add(new THREE.Vector3(0,PLAYERCONF.h-0.2,0));
+    camera.rotation.set(pitch, yaw, 0, 'YXZ');
+  } else {
+    // third-person camera (simple chase cam)
+    const camDist = 4.5, camHeight = 2.1;
+    const camOff = new THREE.Vector3(Math.sin(yaw)*-camDist, camHeight, Math.cos(yaw)*-camDist);
+    camera.position.copy(player.position).add(camOff);
+    camera.lookAt(player.position.x, player.position.y+1.3, player.position.z);
+  }
 }
 
 /* start single-player quickly */
