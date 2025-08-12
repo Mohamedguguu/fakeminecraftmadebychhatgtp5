@@ -3,204 +3,194 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Mini Minecraft — Improved Physics & Sun</title>
+<title>Mini-Minecraft — Client (Single + Multiplayer)</title>
 <style>
   html,body{height:100%;margin:0;overflow:hidden;background:#87ceeb}
   canvas{display:block}
-  #hud{position:fixed;left:10px;top:10px;color:#fff;font-family:Segoe UI,Arial;z-index:40;background:rgba(0,0,0,0.25);padding:8px;border-radius:6px}
-  #hotbar{position:fixed;left:50%;transform:translateX(-50%);bottom:12px;display:flex;gap:8px;z-index:40}
+  #hud{position:fixed;left:10px;top:10px;color:#fff;font-family:Segoe UI,Arial;z-index:60;background:rgba(0,0,0,0.25);padding:6px;border-radius:6px}
+  #hotbar{position:fixed;left:50%;transform:translateX(-50%);bottom:12px;display:flex;gap:8px;z-index:60}
   .slot{width:64px;height:64px;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;color:#fff;border-radius:6px;cursor:pointer}
   .sel{outline:3px solid #ffd700}
-  #menu{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#111;color:#fff;padding:16px;border-radius:8px;display:none;z-index:50}
-  #note{position:fixed;right:10px;top:10px;color:#fff;background:rgba(0,0,0,0.25);padding:8px;border-radius:6px;font-family:Segoe UI,Arial;z-index:40}
-  button{padding:8px 12px;border-radius:6px;border:none;background:#2c2c2c;color:#fff;cursor:pointer}
+  #note{position:fixed;right:10px;top:10px;color:#fff;background:rgba(0,0,0,0.25);padding:8px;border-radius:6px;font-family:Segoe UI,Arial;z-index:60}
+  #menu{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#111;color:#fff;padding:16px;border-radius:8px;display:none;z-index:80}
+  #dbg{position:fixed;right:10px;bottom:10px;width:360px;height:220px;background:rgba(0,0,0,0.85);color:#0f0;padding:8px;border-radius:6px;font-family:monospace;font-size:12px;overflow:auto;z-index:100}
+  #dbg .err{color:#ff8080} #dbg .warn{color:#ffd080}
 </style>
 </head>
 <body>
-  <div id="hud">View: <span id="viewMode">Third-person</span> • Press <b>V</b> to toggle • Click canvas to lock mouse • Esc to unlock</div>
+  <div id="hud">View: <span id="viewMode">Third-person</span> • Press <b>V</b> to toggle • Esc = Menu</div>
   <div id="note">WASD move • Shift sprint • Space jump • Left click place • Right click break • 1/2/3 change block</div>
   <div id="hotbar">
     <div class="slot sel" data-type="dirt">Dirt<br/><small>1</small></div>
     <div class="slot" data-type="grass">Grass<br/><small>2</small></div>
     <div class="slot" data-type="stone">Stone<br/><small>3</small></div>
   </div>
-  <div id="menu"><h3>Paused</h3><div style="margin-top:8px"><button id="resumeBtn">Resume</button></div></div>
+  <div id="menu"><h3>Menu</h3><div style="margin-top:8px"><button id="resumeBtn">Resume</button></div></div>
+  <div id="dbg" title="Debug console (on-page). Use ?ws= to override server URL."></div>
 
-  <!-- Three.js (UMD) -->
+  <!-- Three.js -->
   <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
 
 <script>
-/* ========= CONFIG ========= */
-const WORLD_RADIUS = 28;     // half-width of generated world in x/z
-const MAX_HEIGHT = 12;       // max terrain height
-const BLOCK = { size: 1 };
-const PLAYER = { w: 0.6, h: 1.8, d: 0.6, speed: 5, jump: 8, gravity: -30, step: 0.6 };
-const BLOCK_TYPES = {
-  dirt: { color: 0x8B4513 },
-  grass: { color: 0x2BAE2A },
-  stone: { color: 0xC2C2C2 }
-};
-/* ========================== */
+/* ---------- CONFIG ---------- */
+const WORLD_RADIUS = 28;
+const MAX_HEIGHT = 12;
+const BLOCK_SIZE = 1;
+const PLAYERCONF = { w:0.6,h:1.8,d:0.6, speed:5, jump:8, gravity:-30, step:0.6 };
+const BLOCK_TYPES = { dirt:0x8B4513, grass:0x2BAE2A, stone:0xC2C2C2 };
+/* ---------- END CONFIG ---------- */
 
+/* ---------- debug console (on-screen) ---------- */
+const dbgEl = document.getElementById('dbg');
+function dbgLog(...args){ append('log', ...args); console._orig_log(...args); }
+function dbgWarn(...args){ append('warn', ...args); console._orig_warn(...args); }
+function dbgErr(...args){ append('err', ...args); console._orig_error(...args); }
+function append(type, ...args){
+  const line = document.createElement('div');
+  line.className = type;
+  line.textContent = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+  dbgEl.appendChild(line);
+  dbgEl.scrollTop = dbgEl.scrollHeight;
+}
+(function hijackConsole(){
+  console._orig_log = console.log; console._orig_warn = console.warn; console._orig_error = console.error;
+  console.log = dbgLog; console.warn = dbgWarn; console.error = dbgErr;
+})();
+
+window.addEventListener('error', (e) => {
+  append('err', `Error: ${e.message} (${e.filename}:${e.lineno})`);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  append('err', 'UnhandledRejection', e.reason);
+});
+
+/* ---------- utility ---------- */
+function key(x,y,z){return `${x},${y},${z}`;}
+function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
+
+/* ---------- three.js scene setup ---------- */
 let scene, camera, renderer;
-let world = {};     // key -> mesh
-let pickables = []; // blocks for raycast
-let mats = {};
-let selectedBlock = 'dirt';
-let firstPerson = false;
-let pointerLocked = false;
-
-/* ---------- init three ---------- */
+let mats = {}, world = {}, pickables = [];
 function initThree(){
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x87ceeb);
-
   renderer = new THREE.WebGLRenderer({antialias:true});
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   document.body.appendChild(renderer.domElement);
-
-  camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 1000);
+  camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
 }
 
-/* ---------- lights & sun ---------- */
+/* ---------- lighting ---------- */
 function addLights(){
-  const ambient = new THREE.AmbientLight(0xffffff, 0.45);
-  scene.add(ambient);
-
-  // Sun (directional) with strong shadows
+  const ambient = new THREE.AmbientLight(0xffffff, 0.45); scene.add(ambient);
   const sun = new THREE.DirectionalLight(0xffffff, 0.95);
-  sun.position.set(90, 120, 40);
-  sun.castShadow = true;
+  sun.position.set(80,120,40); sun.castShadow = true;
   sun.shadow.camera.left = -60; sun.shadow.camera.right = 60;
   sun.shadow.camera.top = 60; sun.shadow.camera.bottom = -60;
   sun.shadow.mapSize.set(2048,2048);
   scene.add(sun);
-
-  // subtle rim light
-  const rim = new THREE.DirectionalLight(0xfff4c3, 0.15);
-  rim.position.set(-50, 40, -40);
-  scene.add(rim);
 }
 
-/* ---------- terrain generation (nice hills) ---------- */
+/* ---------- blocks ---------- */
+function createMaterials(){
+  mats = {};
+  for(const t in BLOCK_TYPES) mats[t] = new THREE.MeshLambertMaterial({ color: BLOCK_TYPES[t] });
+}
+
+function addBlock(x,y,z,type='dirt', fromServer=false){
+  const id = key(x,y,z);
+  if(world[id]) return;
+  const geo = new THREE.BoxGeometry(BLOCK_SIZE,BLOCK_SIZE,BLOCK_SIZE);
+  const mesh = new THREE.Mesh(geo, mats[type] || mats['dirt']);
+  mesh.position.set(x, y, z);
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  mesh.userData.type = type;
+  scene.add(mesh);
+  world[id] = mesh;
+  pickables.push(mesh);
+  if(!fromServer){ // if local-only, nothing; server-side will broadcast
+    // no-op
+  }
+}
+
+function removeBlock(x,y,z, fromServer=false){
+  const id = key(x,y,z); const m = world[id];
+  if(!m) return;
+  scene.remove(m);
+  const i = pickables.indexOf(m); if(i>=0) pickables.splice(i,1);
+  delete world[id];
+  if(!fromServer){
+    // no-op
+  }
+}
+
+/* ---------- terrain fallback (single-player) ---------- */
 function heightAt(x,z){
-  // layered sines for pseudo-noise + radial fade
-  const s = Math.sin(x*0.08) * 2.0 + Math.cos(z*0.07) * 2.5 + Math.sin((x+z)*0.06)*3;
+  const s = Math.sin(x*0.08)*2.0 + Math.cos(z*0.07)*2.5 + Math.sin((x+z)*0.06)*3;
   const d = Math.sqrt(x*x + z*z) / (WORLD_RADIUS+4);
   const h = Math.floor((s + (Math.random()*0.9 - 0.45)) * (1 - d*0.9) + 2);
   return Math.max(0, Math.min(MAX_HEIGHT, h));
 }
 
-function key(x,y,z){return `${x},${y},${z}`;}
-
-function addBlock(x,y,z,type='dirt'){
-  const id = key(x,y,z);
-  if(world[id]) return;
-  const geo = new THREE.BoxGeometry(BLOCK.size, BLOCK.size, BLOCK.size);
-  const mesh = new THREE.Mesh(geo, mats[type]);
-  mesh.position.set(x, y, z);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  mesh.userData.type = type;
-  scene.add(mesh);
-  world[id] = mesh;
-  pickables.push(mesh);
-}
-
-function removeBlock(x,y,z){
-  const id = key(x,y,z);
-  const m = world[id];
-  if(!m) return;
-  scene.remove(m);
-  const i = pickables.indexOf(m); if(i!==-1) pickables.splice(i,1);
-  delete world[id];
-}
-
-/* generate world */
-function generateWorld(){
-  mats = {};
-  for(const t in BLOCK_TYPES) mats[t] = new THREE.MeshLambertMaterial({ color: BLOCK_TYPES[t].color });
+function generateLocalWorld(){
   const R = WORLD_RADIUS;
   for(let x=-R; x<=R; x++){
     for(let z=-R; z<=R; z++){
       const h = heightAt(x,z);
       for(let y=0; y<=h; y++){
         const type = (y < h-2) ? 'stone' : (y===h && Math.random()>0.88 ? 'grass' : 'dirt');
-        addBlock(x, y, z, type);
+        addBlock(x,y,z, type, true);
       }
     }
   }
 }
 
-/* ---------- player (Steve) ---------- */
-let player;
-let vel = new THREE.Vector3(0,0,0);
-let yaw = 0, pitch = 0;
-let onGround = false;
-
-function createPlayer(){
+/* ---------- player model ---------- */
+let player, vel = new THREE.Vector3(), yaw = 0, pitch = 0, onGround=false;
+function createPlayerModel(){
   player = new THREE.Group();
-  // body
   const body = new THREE.Mesh(new THREE.BoxGeometry(0.8,1.0,0.4), new THREE.MeshLambertMaterial({color:0x00aaff}));
   body.position.set(0,1.25,0);
-  // head
   const head = new THREE.Mesh(new THREE.BoxGeometry(0.7,0.7,0.7), new THREE.MeshLambertMaterial({color:0xffd9b3}));
   head.position.set(0,1.9,0);
-  // arms/hands
-  const armMat = new THREE.MeshLambertMaterial({color:0xffc4a3});
-  const armL = new THREE.Mesh(new THREE.BoxGeometry(0.2,0.9,0.2), armMat);
-  armL.position.set(-0.6,1.25,0);
-  const armR = armL.clone(); armR.position.set(0.6,1.25,0);
-  // legs
-  const legMat = new THREE.MeshLambertMaterial({color:0x333333});
-  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.3,0.9,0.3), legMat);
-  legL.position.set(-0.18,0.45,0);
-  const legR = legL.clone(); legR.position.set(0.18,0.45,0);
-
+  const armL = new THREE.Mesh(new THREE.BoxGeometry(0.2,0.9,0.2), new THREE.MeshLambertMaterial({color:0xffc4a3}));
+  armL.position.set(-0.6,1.25,0); const armR = armL.clone(); armR.position.set(0.6,1.25,0);
+  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.3,0.9,0.3), new THREE.MeshLambertMaterial({color:0x333333}));
+  legL.position.set(-0.18,0.45,0); const legR = legL.clone(); legR.position.set(0.18,0.45,0);
   player.add(body, head, armL, armR, legL, legR);
-  player.position.set(0, 30, 8);
+  player.position.set(0,6,6);
   scene.add(player);
 }
 
-/* ---------- camera & controls ---------- */
+/* ---------- camera & pointer lock ---------- */
+let firstPerson = false, pointerLocked=false;
 function updateCamera(){
   if(firstPerson){
-    // camera at head
-    const head = new THREE.Vector3();
-    player.children[1].getWorldPosition(head);
-    camera.position.copy(head).add(new THREE.Vector3(0,0.06,0));
-    // compute look direction from yaw/pitch
+    const headPos = new THREE.Vector3(); player.children[1].getWorldPosition(headPos);
+    camera.position.copy(headPos).add(new THREE.Vector3(0,0.06,0));
     const dir = new THREE.Vector3(Math.sin(yaw)*Math.cos(pitch), Math.sin(pitch), Math.cos(yaw)*Math.cos(pitch));
     camera.lookAt(camera.position.clone().add(dir));
   } else {
-    // third-person: behind+above player relative to yaw
     const behind = new THREE.Vector3(Math.sin(yaw)*3.8, 2.2, Math.cos(yaw)*3.8);
     const target = player.position.clone().add(behind);
     camera.position.lerp(target, 0.14);
     camera.lookAt(player.position.clone().add(new THREE.Vector3(0,1.2,0)));
   }
 }
-
-// pointer lock mouse look
 function enablePointerLock(){
   renderer.domElement.addEventListener('click', ()=> renderer.domElement.requestPointerLock?.());
-  document.addEventListener('pointerlockchange', ()=>{
-    pointerLocked = document.pointerLockElement === renderer.domElement;
-  });
+  document.addEventListener('pointerlockchange', ()=> pointerLocked = (document.pointerLockElement === renderer.domElement));
   document.addEventListener('mousemove', (e)=>{
     if(!pointerLocked) return;
-    const sens = 0.0022;
-    yaw -= (e.movementX || 0) * sens;
-    pitch -= (e.movementY || 0) * sens;
-    pitch = Math.max(-Math.PI/2+0.01, Math.min(Math.PI/2-0.01, pitch));
+    const sens = 0.0022; yaw -= (e.movementX||0)*sens; pitch -= (e.movementY||0)*sens;
+    pitch = clamp(pitch, -Math.PI/2+0.01, Math.PI/2-0.01);
     if(!firstPerson) player.rotation.y = yaw;
   });
 }
 
-/* ---------- physics (AABB collisions + stepping) ---------- */
-function aabbIntersectsBlock(px, py, pz, halfW, halfH, halfD){
+/* ---------- collision helpers ---------- */
+function aabbIntersects(px,py,pz, halfW, halfH, halfD){
   const minX = Math.floor(px - halfW), maxX = Math.floor(px + halfW);
   const minY = Math.floor(py - halfH), maxY = Math.floor(py + halfH);
   const minZ = Math.floor(pz - halfD), maxZ = Math.floor(pz + halfD);
@@ -214,241 +204,241 @@ function aabbIntersectsBlock(px, py, pz, halfW, halfH, halfD){
   return false;
 }
 
-/* Collision resolution: step wise */
-function resolveMovement(dt){
-  const halfW = PLAYER.w/2, halfH = PLAYER.h/2, halfD = PLAYER.d/2;
+/* ---------- input & hotbar ---------- */
+const keys = {}; window.addEventListener('keydown', (e)=>{ keys[e.key.toLowerCase()] = true; if(e.key==='Escape') document.exitPointerLock?.(); if(e.key.toLowerCase()==='v'){ firstPerson = !firstPerson; document.getElementById('viewMode').innerText = firstPerson ? 'First-person' : 'Third-person'; }});
+window.addEventListener('keyup', (e)=> keys[e.key.toLowerCase()] = false);
+document.querySelectorAll('.slot').forEach(s => s.addEventListener('click', ()=> { document.querySelectorAll('.slot').forEach(x=>x.classList.remove('sel')); s.classList.add('sel'); selectedBlock = s.dataset.type; }));
+window.addEventListener('keydown', (e) => { if(['1','2','3'].includes(e.key)){ const m={'1':'dirt','2':'grass','3':'stone'}[e.key]; document.querySelectorAll('.slot').forEach(x=>x.classList.toggle('sel', x.dataset.type===m)); selectedBlock = m; } });
 
-  // Apply gravity
-  vel.y += PLAYER.gravity * dt;
+let selectedBlock = 'dirt';
 
-  // Compute desired position
-  const desired = player.position.clone().addScaledVector(vel, dt);
-
-  // Y axis (vertical) handling first: test vertical alone
-  const testY = player.position.clone(); testY.y = desired.y;
-  if(aabbIntersectsBlock(testY.x, testY.y, testY.z, halfW, halfH, halfD)){
-    // collision vertically
-    if(vel.y < 0){
-      // falling: snap to top of block underfoot
-      const px = Math.round(player.position.x), pz = Math.round(player.position.z);
-      let highest = -Infinity;
-      // check reasonable vertical range
-      for(let yy = Math.floor(player.position.y - 4); yy <= Math.floor(player.position.y + 3); yy++){
-        if(world[key(px, yy, pz)]) highest = Math.max(highest, yy);
-      }
-      if(isFinite(highest)){
-        player.position.y = highest + halfH + 0.0001 + 1; // block is centered at integer; +1 because our blocks' center y equals integer
-        // NOTE: blocks are positioned at integer y; we used center at integer — to align with generation we placed mesh.position.y = y (center)
-        // So top surface is at y + 0.5. We used player.position as center; adjust accordingly:
-        player.position.y = highest + 0.5 + halfH + 0.0001;
-      }
-      vel.y = 0;
-      onGround = true;
-    } else {
-      // hitting ceiling
-      vel.y = 0;
-    }
-  } else {
-    player.position.y = testY.y;
-    onGround = false;
-  }
-
-  // X axis
-  const testX = player.position.clone(); testX.x = desired.x;
-  if(!aabbIntersectsBlock(testX.x, testX.y, testX.z, halfW, halfH, halfD)){
-    player.position.x = testX.x;
-  } else {
-    // try step-up if small step available
-    const stepUpPos = player.position.clone();
-    stepUpPos.y += PLAYER.step;
-    const testStep = stepUpPos.clone(); testStep.x = desired.x;
-    if(!aabbIntersectsBlock(testStep.x, testStep.y, testStep.z, halfW, halfH, halfD)){
-      player.position.y += PLAYER.step;
-      player.position.x = testStep.x;
-    } else {
-      vel.x = 0;
-    }
-  }
-
-  // Z axis
-  const testZ = player.position.clone(); testZ.z = desired.z;
-  if(!aabbIntersectsBlock(testZ.x, testZ.y, testZ.z, halfW, halfH, halfD)){
-    player.position.z = testZ.z;
-  } else {
-    const stepUpPos = player.position.clone(); stepUpPos.y += PLAYER.step;
-    const testStep = stepUpPos.clone(); testStep.z = desired.z;
-    if(!aabbIntersectsBlock(testStep.x, testStep.y, testStep.z, halfW, halfH, halfD)){
-      player.position.y += PLAYER.step;
-      player.position.z = testStep.z;
-    } else {
-      vel.z = 0;
-    }
-  }
-
-  // small clamp: if player falls out below -50 reset
-  if(player.position.y < -60){
-    player.position.set(0, 30, 0);
-    vel.set(0,0,0);
-  }
-}
-
-/* ---------- input, movement loop ---------- */
-const keys = {};
-window.addEventListener('keydown',(e)=>{ keys[e.key.toLowerCase()] = true; if(e.key==='Escape') document.exitPointerLock?.(); if(e.key.toLowerCase()==='v'){ firstPerson = !firstPerson; document.getElementById('viewMode').innerText = firstPerson ? 'First-person' : 'Third-person'; }});
-window.addEventListener('keyup',(e)=> keys[e.key.toLowerCase()] = false);
-
-/* hotbar handling */
-document.querySelectorAll('.slot').forEach(s=>{
-  s.addEventListener('click', ()=> {
-    selectedBlock = s.dataset.type;
-    document.querySelectorAll('.slot').forEach(x=>x.classList.remove('sel'));
-    s.classList.add('sel');
-  });
-});
-
-window.addEventListener('keydown',(e)=>{
-  if(['1','2','3'].includes(e.key)){
-    const map = {'1':'dirt','2':'grass','3':'stone'};
-    selectedBlock = map[e.key];
-    document.querySelectorAll('.slot').forEach(x=>x.classList.toggle('sel', x.dataset.type === selectedBlock));
-  }
-});
-
-/* mouse interactions: place/break w/ raycast */
+/* ---------- raycast place/break ---------- */
 const raycaster = new THREE.Raycaster();
 function onPointerDown(e){
-  // left=0 place, right=2 break
   if(e.button !== 0 && e.button !== 2) return;
-  // compute normalized coords
   const rect = renderer.domElement.getBoundingClientRect();
-  const mx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-  const my = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  const mx = ((e.clientX-rect.left)/rect.width)*2 - 1;
+  const my = -((e.clientY-rect.top)/rect.height)*2 + 1;
   raycaster.setFromCamera(new THREE.Vector2(mx,my), camera);
   const hits = raycaster.intersectObjects(pickables, false);
   if(!hits.length) return;
   const hit = hits[0];
   if(e.button === 2){
-    // break
-    const p = hit.object.position;
-    removeBlock(p.x, p.y, p.z);
+    const p = hit.object.position; removeBlock(p.x,p.y,p.z, true);
+    sendIfConnected({ t:'remove', x:p.x, y:p.y, z:p.z });
   } else {
-    // place adjacent
-    const pos = hit.object.position.clone();
-    const n = hit.face.normal.clone();
-    const t = pos.clone().add(n);
-    const tx = Math.round(t.x), ty = Math.round(t.y), tz = Math.round(t.z);
-    // don't place inside player AABB
+    const pos = hit.object.position.clone(); const n = hit.face.normal.clone(); const t = pos.clone().add(n);
+    const tx=Math.round(t.x), ty=Math.round(t.y), tz=Math.round(t.z);
     if(!pointInsidePlayer(tx+0.5, ty+0.9, tz+0.5)){
-      addBlock(tx, ty, tz, selectedBlock);
+      addBlock(tx,ty,tz, selectedBlock, true);
+      sendIfConnected({ t:'place', x:tx, y:ty, z:tz, type: selectedBlock });
     }
   }
 }
-
-function pointInsidePlayer(px, py, pz){
-  const halfW = PLAYER.w/2, halfH = PLAYER.h/2, halfD = PLAYER.d/2;
+function pointInsidePlayer(px,py,pz){
+  const halfW = PLAYERCONF.w/2, halfH = PLAYERCONF.h/2, halfD = PLAYERCONF.d/2;
   const minX = player.position.x - halfW, maxX = player.position.x + halfW;
   const minY = player.position.y - halfH, maxY = player.position.y + halfH;
   const minZ = player.position.z - halfD, maxZ = player.position.z + halfD;
   return px >= minX && px <= maxX && py >= minY && py <= maxY && pz >= minZ && pz <= maxZ;
 }
-
-renderer.domElement.addEventListener('pointerdown', onPointerDown);
+renderer?.domElement && renderer.domElement.addEventListener && renderer.domElement.addEventListener('pointerdown', () => {}); // ensure no early error
+window.addEventListener('pointerdown', onPointerDown); // simpler binding
 window.addEventListener('contextmenu', e => e.preventDefault());
 
-/* ---------- main loop ---------- */
-let last = performance.now();
-function animate(){
-  const now = performance.now();
-  const dt = Math.min(0.05, (now - last) / 1000);
-  last = now;
+/* ---------- multiplayer websocket ---------- */
+let ws = null;
+let clientId = null;
+const otherPlayers = {}; // id -> mesh
 
-  // movement input
-  const forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
-  const right = new THREE.Vector3(Math.sin(yaw + Math.PI/2), 0, Math.cos(yaw + Math.PI/2));
+function sendIfConnected(obj){
+  if(ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+// Choose server address:
+// 1) url param ?ws=wss://... overrides
+// 2) else connect to same host (wss on https, ws on http)
+function getServerAddr(){
+  try {
+    const params = new URLSearchParams(location.search);
+    const w = params.get('ws');
+    if(w) return w;
+  } catch(e){}
+  return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+}
+
+function setupWSConnection(){
+  const addr = getServerAddr();
+  console.log('Trying WS:', addr);
+  try {
+    ws = new WebSocket(addr);
+  } catch(e){ console.warn('WS connect error', e); return fallbackToLocal(); }
+
+  let initReceived = false;
+  const initTimeout = setTimeout(()=> {
+    if(!initReceived){ console.warn('WS init not received in time, falling back to single-player'); ws && ws.close(); fallbackToLocal(); }
+  }, 2500);
+
+  ws.onopen = () => { console.log('WS open'); };
+  ws.onmessage = (ev) => {
+    try {
+      const d = JSON.parse(ev.data);
+      if(d.t === 'init'){
+        initReceived = true;
+        clearTimeout(initTimeout);
+        clientId = d.id;
+        // clear local world and load server blocks
+        for(const k in world){ removeBlock(...k.split(',').map(Number), true); } // tbd: safe clear
+        // load blocks from server
+        (d.blocks || []).forEach(b => addBlock(b.x, b.y, b.z, b.type, true));
+        // load remote players
+        (d.players || []).forEach(p => {
+          if(p.id === clientId) return;
+          createOrUpdateRemote(p);
+        });
+        console.log('WS init complete. Blocks:', (d.blocks||[]).length, 'players:', (d.players||[]).length);
+      } else if(d.t === 'place'){
+        addBlock(d.x, d.y, d.z, d.type, true);
+      } else if(d.t === 'remove'){
+        removeBlock(d.x, d.y, d.z, true);
+      } else if(d.t === 'move'){
+        createOrUpdateRemote(d);
+      } else if(d.t === 'join'){
+        createOrUpdateRemote(d);
+      } else if(d.t === 'leave'){
+        removeRemote(d.id);
+      }
+    } catch(e){ console.error('Bad WS data', e); }
+  };
+  ws.onclose = () => {
+    console.warn('WS closed. Running single-player mode.');
+    ws = null;
+  };
+  ws.onerror = (e) => console.error('WS error', e);
+}
+
+function createOrUpdateRemote(d){
+  if(!d || !d.id) return;
+  if(d.id === clientId) return;
+  let g = otherPlayers[d.id];
+  if(!g){
+    g = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.8,1.0,0.4), new THREE.MeshLambertMaterial({color:0xff5555}));
+    body.position.set(0,1.0,0);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.6,0.6,0.6), new THREE.MeshLambertMaterial({color:0xffd9b3}));
+    head.position.set(0,1.5,0);
+    g.add(body, head);
+    scene.add(g);
+    otherPlayers[d.id] = g;
+  }
+  g.position.set(d.x, d.y, d.z);
+  if(typeof d.rx === 'number') g.rotation.y = d.rx;
+}
+
+function removeRemote(id){ if(otherPlayers[id]){ scene.remove(otherPlayers[id]); delete otherPlayers[id]; } }
+
+/* ---------- physics update & movement ---------- */
+let last = performance.now();
+function simulate(dt){
+  const forward = new THREE.Vector3(Math.sin(yaw),0,Math.cos(yaw));
+  const right = new THREE.Vector3(Math.sin(yaw+Math.PI/2),0,Math.cos(yaw+Math.PI/2));
   const move = new THREE.Vector3();
   if(keys['w']) move.add(forward);
   if(keys['s']) move.sub(forward);
   if(keys['a']) move.sub(right);
   if(keys['d']) move.add(right);
-  if(move.lengthSq() > 0.0001) move.normalize();
+  if(move.lengthSq()>0.0001) move.normalize();
 
-  const spd = PLAYER.speed * (keys['shift'] ? 1.8 : 1);
-  // smooth horizontal velocity
-  vel.x = THREE.MathUtils.lerp(vel.x, move.x * spd, 0.12);
-  vel.z = THREE.MathUtils.lerp(vel.z, move.z * spd, 0.12);
+  const speed = PLAYERCONF.speed * (keys['shift'] ? 1.8 : 1);
+  vel.x = THREE.MathUtils.lerp(vel.x, move.x * speed, 0.12);
+  vel.z = THREE.MathUtils.lerp(vel.z, move.z * speed, 0.12);
 
-  // jump
-  if(keys[' '] && onGround){
-    vel.y = PLAYER.jump;
-    onGround = false;
+  if(keys[' '] && onGround){ vel.y = PLAYERCONF.jump; onGround = false; }
+
+  // gravity
+  vel.y += PLAYERCONF.gravity * dt;
+
+  // integrate with simple collision/stepping
+  const desired = player.position.clone().addScaledVector(vel, dt);
+
+  // vertical
+  const halfW = PLAYERCONF.w/2, halfH = PLAYERCONF.h/2, halfD = PLAYERCONF.d/2;
+  const testY = player.position.clone(); testY.y = desired.y;
+  if(aabbIntersects(testY.x, testY.y, testY.z, halfW, halfH, halfD)){
+    if(vel.y < 0){
+      // snap to top of block
+      const px = Math.round(player.position.x), pz = Math.round(player.position.z);
+      let highest = -Infinity;
+      for(let yy = Math.floor(player.position.y-4); yy <= Math.floor(player.position.y+3); yy++){
+        if(world[key(px, yy, pz)]) highest = Math.max(highest, yy);
+      }
+      if(isFinite(highest)){
+        player.position.y = highest + 0.5 + halfH + 0.0001;
+      }
+      vel.y = 0; onGround = true;
+    } else { vel.y = 0; }
+  } else { player.position.y = testY.y; onGround = false; }
+
+  // X axis
+  const testX = player.position.clone(); testX.x = desired.x;
+  if(!aabbIntersects(testX.x, testX.y, testX.z, halfW, halfH, halfD)) player.position.x = testX.x; else vel.x = 0;
+  // Z axis
+  const testZ = player.position.clone(); testZ.z = desired.z;
+  if(!aabbIntersects(testZ.x, testZ.y, testZ.z, halfW, halfH, halfD)) player.position.z = testZ.z; else vel.z = 0;
+
+  // small out-of-world reset
+  if(player.position.y < -60){ player.position.set(0, 30, 0); vel.set(0,0,0); }
+
+  // send move occasionally to server
+  if(ws && ws.readyState === WebSocket.OPEN){
+    const now = performance.now();
+    if(!ws._lastSent || now - ws._lastSent > 60){
+      ws.send(JSON.stringify({ t:'move', x:player.position.x, y:player.position.y, z:player.position.z, rx:player.rotation.y }));
+      ws._lastSent = now;
+    }
   }
+}
 
-  // apply physics & collisions
-  resolveMovement(dt);
-
-  // update player rotation (smooth)
-  if(!firstPerson){
-    // player rotates toward yaw
-    player.rotation.y = THREE.MathUtils.lerp(player.rotation.y, yaw, 0.12);
-  }
-
-  // camera
+/* ---------- render loop ---------- */
+function animate(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  simulate(dt);
   updateCamera();
-
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
 
-/* ---------- helpers & start ---------- */
-function findGroundAndPlacePlayer(){
-  // place player at near center above terrain
-  const px = 0, pz = 6;
-  // find highest block at px,pz
-  let highest = -Infinity;
-  for(const keyStr in world){
-    const parts = keyStr.split(',').map(Number);
-    if(parts[0] === px && parts[2] === pz) highest = Math.max(highest, parts[1]);
+/* ---------- init flow ---------- */
+function fallbackToLocal(){
+  if(Object.keys(world).length === 0){
+    dbgLog('Generating local world...');
+    generateLocalWorld();
   }
-  const y = (isFinite(highest) ? highest + 0.5 + PLAYER.h/2 + 0.5 : 6);
-  player.position.set(px, y, pz);
 }
 
-function setup(){
+function start(){
   initThree();
+  createMaterials();
   addLights();
-  generateWorld();
-  createPlayer();
-  findGroundAndPlacePlayer();
+  createPlayerModel();
+  // attempt WS; if it fails, fallback to local world generation after timeout
+  setupWSConnection();
+  // pointer lock setup & events after renderer exists
   enablePointerLock();
-
-  // small initial camera offset for third-person
-  camera.position.set(player.position.x + 4, player.position.y + 2.5, player.position.z + 4);
-  yaw = 0; pitch = 0;
-
-  // UI handlers
-  document.getElementById('resumeBtn').onclick = ()=> document.getElementById('menu').style.display='none';
-  window.addEventListener('resize', ()=> {
-    camera.aspect = innerWidth/innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(innerWidth, innerHeight);
-  });
-
-  // select initial hotbar
-  document.querySelectorAll('.slot').forEach(s => s.classList.toggle('sel', s.dataset.type === selectedBlock));
-  // number keys already handled above
-
-  // start loop
+  // set initial camera position a bit behind
+  camera.position.set(4,8,12);
+  camera.lookAt(player.position);
   last = performance.now();
   animate();
+  window.addEventListener('resize', ()=>{ camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+  // If no ws response after small time, do local world
+  setTimeout(()=> { if(!ws || ws.readyState !== WebSocket.OPEN) fallbackToLocal(); }, 1400);
 }
 
-setup();
-
-/* expose for quick debugging */
-window.__world = world;
-window.__addBlock = addBlock;
-window.__removeBlock = removeBlock;
-window.__player = player;
+/* kick off */
+start();
 </script>
 </body>
 </html>
